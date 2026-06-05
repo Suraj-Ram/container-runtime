@@ -3,13 +3,15 @@ mod friendly_id;
 // use std::process::Command;
 use nix::{
     libc,
-    sys::wait::waitpid,
+    sched::{CloneFlags, clone},
+    sys::wait::{WaitStatus, waitpid},
     unistd::{ForkResult, execvp, fork, write},
 };
 
 use std::{
     env,
     ffi::{CStr, CString},
+    io::Write,
 };
 
 fn extract_prog_args() -> Vec<String> {
@@ -28,20 +30,41 @@ fn main() {
 
     dbg!(&prog_args);
 
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { child, .. }) => {
-            println!(
-                "Continuing execution in parent process, new child has pid: {}",
-                child
-            );
-            waitpid(child, None).unwrap();
+    let mut clone_stack = [0u8; 64 * 1024];
+    let clone_flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUTS;
+
+    let clone_child_callback = Box::new(|| {
+        println!("Hello from the isolated child process!");
+        let _ = execvp(&prog_args[0], &prog_args);
+        0 // Exit code 0
+    });
+
+    println!("Parent: cloning process...");
+    let clone_result = unsafe {
+        clone(
+            clone_child_callback,
+            &mut clone_stack,
+            clone_flags,
+            Some(libc::SIGCHLD),
+        )
+    };
+
+    dbg!(clone_result);
+
+    match clone_result {
+        Ok(child_pid) => {
+            println!("Parent: Successfully spawned child with PID: {}", child_pid);
+
+            // 5. Wait for the child process to finish executing.
+            match waitpid(child_pid, None) {
+                Ok(WaitStatus::Exited(pid, status)) => {
+                    println!("Parent: Child {} exited with status code {}.", pid, status);
+                }
+                _ => println!("Parent: Something else happened while waiting."),
+            }
         }
-        Ok(ForkResult::Child) => {
-            // Unsafe to use `println!` (or `unwrap`) here. See Safety.
-            // write(std::io::stdout(), "I'm a new child process\n".as_bytes()).ok();
-            println!("in child");
-            let _ = execvp(&prog_args[0], &prog_args);
+        Err(err) => {
+            eprintln!("Failed to clone process: {}. (Did you forget sudo?)", err);
         }
-        Err(_) => println!("Fork failed"),
     }
 }
