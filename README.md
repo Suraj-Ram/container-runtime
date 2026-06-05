@@ -15,4 +15,4 @@ orb -m rust-dev
 ```
 
 This opens a shell into the Ubuntu VM, then we can build and run it using 
-`cargo build` and `./target/debug/container-runtime -- [ARGS]`
+`cargo build` and `./target/debug/container-runtime [ARGS]`
