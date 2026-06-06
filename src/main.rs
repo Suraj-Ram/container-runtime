@@ -2,13 +2,25 @@ mod friendly_id;
 
 use nix::{
     libc,
-    mount::{MsFlags, mount},
+    mount::{MntFlags, MsFlags, mount, umount2},
     sched::{CloneFlags, clone},
-    sys::wait::{WaitStatus, waitpid},
+    sys::{
+        stat::{Mode, SFlag, makedev, mknod},
+        wait::{WaitStatus, waitpid},
+    },
     unistd::{execvp, pivot_root, sethostname},
 };
 
-use std::{env, ffi::CString, fs::create_dir_all, process::ExitCode};
+use libc::dev_t;
+
+use std::{
+    collections::HashMap,
+    env,
+    ffi::CString,
+    fs::{create_dir_all, remove_dir},
+    os::unix::fs::symlink,
+    process::ExitCode,
+};
 
 fn extract_prog_args() -> Vec<String> {
     env::args().skip(1).collect()
@@ -16,6 +28,47 @@ fn extract_prog_args() -> Vec<String> {
 
 // Hardcoded for now, this should be parameterized later
 const ROOT_FS_PATH: &str = "/home/suraj/rootfs/alpine";
+
+fn mount_dev_dirs() {
+    let perms_rw_all = Mode::from_bits_truncate(0o666);
+    let mut dev_dirs: HashMap<&str, dev_t> = HashMap::new();
+    dev_dirs.insert("/dev/null", makedev(1, 3));
+    dev_dirs.insert("/dev/zero", makedev(1, 5));
+    dev_dirs.insert("/dev/random", makedev(1, 8));
+    dev_dirs.insert("/dev/urandom", makedev(1, 9));
+    dev_dirs.insert("/dev/tty", makedev(5, 0));
+
+    mount(
+        Some("tmpfs"),
+        "/dev",
+        Some("tmpfs"),
+        MsFlags::MS_NOSUID,
+        None::<&str>,
+    )
+    .expect("msg");
+
+    for (path, dev_id) in dev_dirs {
+        mknod(path, SFlag::S_IFCHR, perms_rw_all, dev_id).expect("mknod failed.")
+    }
+
+    symlink("/proc/self/fd", "/dev/fd").expect("symlink failed.");
+    symlink("/proc/self/fd/0", "/dev/stdin").expect("symlink failed.");
+    symlink("/proc/self/fd/1", "/dev/stdout").expect("symlink failed.");
+    symlink("/proc/self/fd/2", "/dev/stderr").expect("symlink failed.");
+    // TODO remove expect and move the error handling to caller level.
+}
+
+/*
+*
+* mount(Some("tmpfs"), "/dev", Some("tmpfs"), MsFlags::MS_NOSUID, None::<&str>)?;
+
+// Create essential device nodes
+nix::sys::stat::mknod("/dev/null", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(1, 3))?;
+nix::sys::stat::mknod("/dev/zero", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(1, 5))?;
+nix::sys::stat::mknod("/dev/random", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(1, 8))?;
+nix::sys::stat::mknod("/dev/urandom", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(1, 9))?;
+nix::sys::stat::mknod("/dev/tty", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(5, 0))?;
+*/
 
 fn main() -> ExitCode {
     println!("Hello, world!");
@@ -63,6 +116,11 @@ fn main() -> ExitCode {
         let _ = pivot_root(ROOT_FS_PATH, old_root_path.as_str()).unwrap();
         std::env::set_current_dir("/").expect("setting current dir failed");
 
+        umount2("/old_root", MntFlags::MNT_DETACH).expect("failed unmounting old root.");
+        remove_dir("/old_root").expect("failed deleting old root");
+
+        // TODO unmount old root
+
         // Mount a new `proc` FS in `/proc`
         let _ = mount(
             Some("proc"),
@@ -72,6 +130,26 @@ fn main() -> ExitCode {
             None::<&str>,
         )
         .expect("Failed to mount a new proc");
+
+        let _ = mount(
+            Some("sysfs"),
+            "/sys",
+            Some("sysfs"),
+            MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+            None::<&str>,
+        )
+        .expect("Failed to mount a new sysfs");
+
+        let _ = mount(
+            Some("tmpfs"),
+            "/tmp",
+            Some("tmpfs"),
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+            None::<&str>,
+        )
+        .expect("Failed to mount a new tmpfs");
+
+        mount_dev_dirs();
 
         // UNCOMMENT FOR DEBUG
         // println!("Printing entries in container root");
