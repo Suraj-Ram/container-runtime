@@ -18,6 +18,7 @@ use std::{
     env,
     ffi::CString,
     fs::{create_dir_all, remove_dir},
+    io,
     os::unix::fs::symlink,
     process::ExitCode,
 };
@@ -29,7 +30,7 @@ fn extract_prog_args() -> Vec<String> {
 // Hardcoded for now, this should be parameterized later
 const ROOT_FS_PATH: &str = "/home/suraj/rootfs/alpine";
 
-fn mount_dev_dirs() {
+fn mount_dev_dirs() -> Result<(), io::Error> {
     let perms_rw_all = Mode::from_bits_truncate(0o666);
     let mut dev_dirs: HashMap<&str, dev_t> = HashMap::new();
     dev_dirs.insert("/dev/null", makedev(1, 3));
@@ -48,27 +49,15 @@ fn mount_dev_dirs() {
     .expect("msg");
 
     for (path, dev_id) in dev_dirs {
-        mknod(path, SFlag::S_IFCHR, perms_rw_all, dev_id).expect("mknod failed.")
+        mknod(path, SFlag::S_IFCHR, perms_rw_all, dev_id)?;
     }
 
-    symlink("/proc/self/fd", "/dev/fd").expect("symlink failed.");
-    symlink("/proc/self/fd/0", "/dev/stdin").expect("symlink failed.");
-    symlink("/proc/self/fd/1", "/dev/stdout").expect("symlink failed.");
-    symlink("/proc/self/fd/2", "/dev/stderr").expect("symlink failed.");
-    // TODO remove expect and move the error handling to caller level.
+    symlink("/proc/self/fd", "/dev/fd")?;
+    symlink("/proc/self/fd/0", "/dev/stdin")?;
+    symlink("/proc/self/fd/1", "/dev/stdout")?;
+    symlink("/proc/self/fd/2", "/dev/stderr")?;
+    Ok(())
 }
-
-/*
-*
-* mount(Some("tmpfs"), "/dev", Some("tmpfs"), MsFlags::MS_NOSUID, None::<&str>)?;
-
-// Create essential device nodes
-nix::sys::stat::mknod("/dev/null", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(1, 3))?;
-nix::sys::stat::mknod("/dev/zero", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(1, 5))?;
-nix::sys::stat::mknod("/dev/random", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(1, 8))?;
-nix::sys::stat::mknod("/dev/urandom", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(1, 9))?;
-nix::sys::stat::mknod("/dev/tty", SFlag::S_IFCHR, Mode::from_bits_truncate(0o666), nix::sys::stat::makedev(5, 0))?;
-*/
 
 fn main() -> ExitCode {
     println!("Hello, world!");
@@ -119,8 +108,6 @@ fn main() -> ExitCode {
         umount2("/old_root", MntFlags::MNT_DETACH).expect("failed unmounting old root.");
         remove_dir("/old_root").expect("failed deleting old root");
 
-        // TODO unmount old root
-
         // Mount a new `proc` FS in `/proc`
         let _ = mount(
             Some("proc"),
@@ -149,21 +136,13 @@ fn main() -> ExitCode {
         )
         .expect("Failed to mount a new tmpfs");
 
-        mount_dev_dirs();
-
-        // UNCOMMENT FOR DEBUG
-        // println!("Printing entries in container root");
-        // let entries = std::fs::read_dir("/").unwrap();
-        // for entry in entries {
-        //     let p = entry.unwrap().path();
-        //     println!("{p:?}");
-        // }
+        mount_dev_dirs().expect("failed mounting dev dirs");
 
         // add better error handling here. if anything fails, write to the pipe. Add to this later.let _ = execvp(&prog_args[0], &prog_args);
         let error = execvp(&prog_args[0], &prog_args);
         eprintln!("EXECVP FAILED: {:?}", error);
 
-        0 // Exit code 0
+        0
     });
 
     println!("Parent: cloning process...");
@@ -175,8 +154,6 @@ fn main() -> ExitCode {
             Some(libc::SIGCHLD),
         )
     };
-
-    // dbg!(clone_result);
 
     match clone_result {
         Ok(child_pid) => {
